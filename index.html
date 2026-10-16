@@ -101,6 +101,23 @@ nav svg{width:24px;height:24px;stroke:currentColor;fill:none;stroke-width:2;stro
 .toast{position:fixed;left:50%;bottom:calc(90px + env(safe-area-inset-bottom));transform:translateX(-50%);background:var(--ink);color:var(--bg);
   padding:10px 16px;border-radius:12px;font-size:14px;z-index:20}
 .offline{font-size:12px;color:var(--muted)}
+.auth{min-height:calc(100vh - 120px);display:flex;flex-direction:column;justify-content:center;padding:12px 0}
+.logo{width:64px;height:64px;border-radius:18px;background:var(--leaf);display:grid;place-items:center;margin-bottom:14px}
+.avatar{width:52px;height:52px;border-radius:50%;background:var(--leaf);color:#fff;display:grid;place-items:center;font-size:22px;font-weight:800;flex:none}
+.badge{font-size:12px;font-weight:700;padding:3px 10px;border-radius:99px;background:var(--leaf-soft);color:var(--leaf);white-space:nowrap}
+.badge.basic{background:rgba(75,139,190,.18);color:var(--blue)}
+.badge.premium{background:rgba(240,180,41,.28);color:var(--ink)}
+.plan{border:2px solid var(--line)}
+.plan.cur{border-color:var(--leaf)}
+.plan ul{list-style:none;margin:12px 0 14px;padding:0}
+.plan li{padding:4px 0 4px 24px;position:relative;font-size:15px}
+.plan li::before{content:"\2713";position:absolute;left:0;color:var(--leaf);font-weight:800}
+.plan li.no{color:var(--muted)}
+.plan li.no::before{content:"\2013";color:var(--muted)}
+.price b{font-size:26px;letter-spacing:-.02em}
+.lock{border-style:dashed;background:transparent}
+.err{color:var(--tomato);font-size:14px;min-height:20px;margin:8px 0}
+.btn:disabled{opacity:.6;cursor:default}
 @media (prefers-reduced-motion:no-preference){.ring circle.p{transition:stroke-dashoffset .6s ease}}
 </style>
 </head>
@@ -233,12 +250,56 @@ const SLOTS=[["breakfast","Breakfast"],["lunch","Lunch"],["dinner","Dinner"],["s
 const ACT=[["Mostly sitting",1.2],["Light activity (1–3 days/week)",1.375],["Moderate (3–5 days/week)",1.55],["Very active (6–7 days/week)",1.725]];
 const GOALS=[["lose","Lose weight (about 0.5 kg/week)",-500],["maintain","Maintain weight",0],["gain","Gain weight (about 0.25 kg/week)",300]];
 
-/* ================= STATE ================= */
-const KEY="nutrilog.v1";
-let S={profile:null,goal:2000,log:{},water:{},custom:[],weights:[],scanned:{}};
-try{const raw=localStorage.getItem(KEY);if(raw)S=Object.assign(S,JSON.parse(raw))}catch(e){}
-const save=()=>{try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){}};
-const U={tab:S.profile?"today":"me",day:new Date(),mealFilter:"All",tipCat:"All",open:null,sheet:null,results:[]};
+/* ---- plans ---- */
+const PLANS={
+ free:{n:"Free",price:0,tag:"For getting started",feat:[["Search and custom food logging",1],["Calorie ring, macros and water tracker",1],["7 days of history",1],["5 saved custom foods",1],["8 meal ideas, 12 tips and the daily tip",1],["Barcode scanning",0],["Data export",0],["Weekly macro averages",0],["30-day insights and custom macro targets",0]]},
+ basic:{n:"Basic",price:4.99,tag:"For regular trackers",feat:[["Everything in Free",1],["Unlimited history",1],["Unlimited saved custom foods",1],["All "+MEALS.length+" meal ideas and all tips",1],["Barcode scanning",1],["Data export",1],["Weekly macro averages",1],["30-day insights and custom macro targets",0]]},
+ premium:{n:"Premium",price:9.99,tag:"For serious progress",feat:[["Everything in Basic",1],["30-day insights, streaks and weight trend",1],["Custom protein, carb and fat targets",1]]}
+};
+const RANK={free:0,basic:1,premium:2};
+// hist = days back you can browse; custom = saved foods; others are on/off
+const LIM={
+ free:{hist:7,custom:5,meals:0,tips:0,scan:0,exp:0,macroavg:0,insights:0,split:0},
+ basic:{hist:1e9,custom:1e9,meals:1,tips:1,scan:1,exp:1,macroavg:1,insights:0,split:0},
+ premium:{hist:1e9,custom:1e9,meals:1,tips:1,scan:1,exp:1,macroavg:1,insights:1,split:1}
+};
+const NEED={hist:"basic",custom:"basic",meals:"basic",tips:"basic",scan:"basic",exp:"basic",macroavg:"basic",insights:"premium",split:"premium"};
+const UPSELL={
+ hist:["Full history","Browse every day you've logged, not just the last 7."],
+ custom:["Unlimited saved foods","Save as many custom foods as you like."],
+ meals:["The full meal library","Unlock every meal idea with ingredients and steps."],
+ tips:["All nutrition tips","Unlock every tip in every category."],
+ scan:["Barcode scanning","Scan packaged foods to fill in calories and macros."],
+ exp:["Data export","Download a backup of all your logs, weights and goals."],
+ macroavg:["Weekly macro averages","See your average protein, carbs and fat for the week."],
+ insights:["30-day insights","Track your streak, on-target days and weight change over 30 days."],
+ split:["Custom macro targets","Choose your own protein, carb and fat split."]
+};
+const FREE_MEALS=[0,1,6,7,11,12,17,18];
+const _cnt={};TIPS.forEach(t=>{_cnt[t.c]=(_cnt[t.c]||0)+1;t.free=_cnt[t.c]<=2});
+
+/* ================= ACCOUNTS & STATE ================= */
+// Accounts live in this browser only (no server). Each account has its own data key.
+const AKEY="nutrilog.accounts",LEGACY="nutrilog.v1";
+let A={users:{},session:null,guest:false,legacyAdopted:false};
+try{const r=localStorage.getItem(AKEY);if(r)A=Object.assign(A,JSON.parse(r))}catch(e){}
+if(A.session&&!A.users[A.session])A.session=null;
+const saveA=()=>{try{localStorage.setItem(AKEY,JSON.stringify(A))}catch(e){}};
+const dataKey=()=>A.session?"nutrilog.data."+A.session:LEGACY;
+const blank=()=>({profile:null,goal:2000,log:{},water:{},custom:[],weights:[],scanned:{},prefs:{units:"metric",water:8},split:null});
+let S=blank();
+function loadData(){
+  S=blank();
+  try{const raw=localStorage.getItem(dataKey());if(raw){const d=JSON.parse(raw);S=Object.assign(S,d);S.prefs=Object.assign({units:"metric",water:8},d.prefs||{})}}catch(e){}
+}
+loadData();
+const authed=()=>!!A.session||A.guest;
+const save=()=>{if(!authed())return;try{localStorage.setItem(dataKey(),JSON.stringify(S))}catch(e){}};
+const hasLegacy=()=>{try{return !!localStorage.getItem(LEGACY)}catch(e){return false}};
+const acct=()=>A.session?A.users[A.session]:null;
+const plan=()=>{const u=acct();return u&&PLANS[u.plan]?u.plan:"free"};
+const can=f=>LIM[plan()][f];
+const U={tab:S.profile?"today":"me",meTab:S.profile?"account":"body",auth:Object.keys(A.users).length?"login":"signup",authErr:"",day:new Date(),mealFilter:"All",tipCat:"All",open:null,sheet:null,results:[]};
 
 /* ================= HELPERS ================= */
 const $=s=>document.querySelector(s);
@@ -250,9 +311,14 @@ const sum=list=>list.reduce((a,e)=>({k:a.k+e.k,p:a.p+e.p,c:a.c+e.c,f:a.f+e.f}),{
 const isToday=d=>dkey(d)===dkey(new Date());
 const num=v=>{const n=parseFloat(v);return isFinite(n)&&n>=0?n:0};
 function toast(msg){const t=document.createElement("div");t.className="toast";t.textContent=msg;document.body.appendChild(t);setTimeout(()=>t.remove(),1800)}
+const r1=x=>Math.round(x*10)/10;
+const imp=()=>S.prefs.units==="imperial";
+const wfmt=kg=>imp()?r1(kg*2.20462)+" lb":kg+" kg";
+const daysBack=d=>{const a=new Date(),b=new Date(d);return Math.round((new Date(a.getFullYear(),a.getMonth(),a.getDate())-new Date(b.getFullYear(),b.getMonth(),b.getDate()))/864e5)};
+function defaultSplit(){const p=S.profile&&S.profile.goal==="lose"?30:25;return {p,f:28,c:100-p-28}}
 function targets(){
-  const k=S.goal,hi=S.profile&&S.profile.goal==="lose"?.30:.25;
-  return {k,p:k*hi/4,c:k*(1-hi-.28)/4,f:k*.28/9};
+  const k=S.goal,sp=S.split&&can("split")?S.split:defaultSplit();
+  return {k,p:k*sp.p/100/4,c:k*sp.c/100/4,f:k*sp.f/100/9};
 }
 function calcGoal(p){
   const bmr=10*p.weight+6.25*p.height-5*p.age+(p.sex==="m"?5:-161);
@@ -275,10 +341,31 @@ function renderNav(){
    .map(([id,l])=>`<button class="${U.tab===id?"on":""}" data-a="tab" data-v="${id}" aria-label="${l}"><svg viewBox="0 0 24 24">${ICON[id]}</svg>${l}</button>`).join("");
 }
 function render(){
+  document.querySelector("nav").style.display=authed()?"":"none";
+  if(!authed()){$("#app").innerHTML=viewAuth();window.scrollTo(0,0);return}
   renderNav();
   const v={today:viewToday,meals:viewMeals,tips:viewTips,week:viewWeek,me:viewMe}[U.tab];
   $("#app").innerHTML=v();
   window.scrollTo(0,0);
+}
+const lockCard=(f,t,d)=>`<div class="card lock"><div class="row between"><h3>${t}</h3><span class="badge ${NEED[f]}">${PLANS[NEED[f]].n}</span></div><p class="muted" style="margin:6px 0 12px">${d}</p><button class="btn sec" data-a="upsell" data-v="${f}">Unlock with ${PLANS[NEED[f]].n}</button></div>`;
+
+function viewAuth(){
+  const su=U.auth==="signup";
+  return `<div class="auth"><div class="logo"><svg width="36" height="36" viewBox="0 0 100 100" aria-hidden="true"><circle cx="50" cy="50" r="28" fill="none" stroke="#F0B429" stroke-width="12"/></svg></div>
+  <h1>${su?"Create your account":"Log in"}</h1>
+  <p class="muted">${su?"You start on the Free plan and can upgrade any time.":"Pick up where you left off."}</p>
+  ${hasLegacy()&&!A.legacyAdopted?`<div class="card" style="background:var(--leaf-soft);border-color:transparent"><b>We found NutriLog data on this device.</b><p class="muted" style="margin-top:4px">${su?"It will move into your new account.":"Create an account to keep it, or continue without one."}</p></div>`:""}
+  <div class="card">
+    ${su?`<label for="aName">Name</label><input id="aName" autocomplete="name">`:""}
+    <label for="aEmail">Email</label><input id="aEmail" type="email" inputmode="email" autocomplete="email">
+    <label for="aPass">Password${su?" (8+ characters)":""}</label><input id="aPass" type="password" autocomplete="${su?"new-password":"current-password"}">
+    <div class="err" id="aErr" role="alert">${esc(U.authErr||"")}</div>
+    <button class="btn" data-a="${su?"signup":"login"}">${su?"Sign up":"Log in"}</button>
+    <button class="btn sec" style="margin-top:10px" data-a="authMode" data-v="${su?"login":"signup"}">${su?"I already have an account":"Create an account"}</button>
+  </div>
+  <button class="btn danger" data-a="guest">Continue without an account</button>
+  <p class="muted" style="margin-top:14px">Accounts are stored on this device only, with no cloud sync. A forgotten password can't be recovered.</p></div>`;
 }
 
 function viewToday(){
@@ -315,9 +402,9 @@ function viewToday(){
       ${es.map(e=>`<div class="entry"><div class="grow"><div class="name">${esc(e.n)}</div><span class="muted">${e.q!==1?e.q+" × · ":""}P ${r0(e.p)} · C ${r0(e.c)} · F ${r0(e.f)}</span></div>
         <b>${r0(e.k)}</b><button class="x" data-a="del" data-v="${e.id}" aria-label="Remove ${esc(e.n)}">×</button></div>`).join("")}
       ${es.length?"":`<p class="muted" style="margin-top:8px">Nothing logged yet. Tap + to add food.</p>`}</div>`}).join("")}
-  <div class="card"><div class="row between"><div><h2 style="margin:0">Water</h2><span class="muted">${water} of 8 glasses (${water*250} ml)</span></div>
+  <div class="card"><div class="row between"><div><h2 style="margin:0">Water</h2><span class="muted">${water} of ${S.prefs.water} glasses (${water*250} ml)</span></div>
     <div class="row"><button class="iconbtn" data-a="water" data-v="-1" aria-label="Remove a glass">−</button><button class="iconbtn" data-a="water" data-v="1" aria-label="Add a glass">+</button></div></div>
-    <div class="glasses" style="margin-top:12px">${Array.from({length:Math.max(8,water)},(_,i)=>`<span class="glass ${i<water?"f":""}"></span>`).join("")}</div></div>
+    <div class="glasses" style="margin-top:12px">${Array.from({length:Math.max(S.prefs.water,water)},(_,i)=>`<span class="glass ${i<water?"f":""}"></span>`).join("")}</div></div>
   <p class="offline">Your data stays on this device and works without internet.</p>`;
 }
 
@@ -328,7 +415,8 @@ function viewMeals(){
     if(f==="All")return true;if(f==="Breakfast")return m.t==="breakfast";if(f==="Lunch")return m.t==="lunch";
     if(f==="Dinner")return m.t==="dinner";if(f==="Snacks")return m.t==="snack";if(f==="Vegetarian")return !!m.veg;
     if(f==="High protein")return m.p>=30;return m.k<=350};
-  const list=MEALS.map((m,i)=>[m,i]).filter(([m])=>ok(m));
+  const all=MEALS.map((m,i)=>[m,i]).filter(([m])=>ok(m));
+  const list=all.filter(([m,i])=>can("meals")||FREE_MEALS.includes(i)),hidden=all.length-list.length;
   return `<h1>Meal ideas</h1><p class="muted">Tap a meal for ingredients and steps, then log it in one tap.</p>
   <div class="chips">${F.map(f=>`<button class="chip ${U.mealFilter===f?"on":""}" data-a="mealFilter" data-v="${f}">${f}</button>`).join("")}</div>
   ${list.map(([m,i])=>{const open=U.open===i;return `<div class="card">
@@ -339,17 +427,20 @@ function viewMeals(){
     ${open?`<div class="detail"><b>Ingredients</b><ul>${m.ing.map(x=>`<li>${esc(x)}</li>`).join("")}</ul><b>Method</b><ol>${m.st.map(x=>`<li>${esc(x)}</li>`).join("")}</ol>
       <div class="row"><select id="slot${i}" aria-label="Meal">${SLOTS.map(([id,n])=>`<option value="${id}" ${id===m.t?"selected":""}>${n}</option>`).join("")}</select>
       <button class="btn" style="width:auto;white-space:nowrap" data-a="logMeal" data-v="${i}">Log meal</button></div></div>`:""}</div>`}).join("")}
-  ${list.length?"":`<div class="card muted">No meals match this filter.</div>`}`;
+  ${hidden?lockCard("meals",hidden+" more meal"+(hidden>1?"s":"")+" in this filter","Unlock the full meal library with ingredients and steps."):""}
+  ${all.length?"":`<div class="card muted">No meals match this filter.</div>`}`;
 }
 
 function viewTips(){
   const cats=["All",...new Set(TIPS.map(t=>t.c))];
   const day=Math.floor(Date.now()/864e5),daily=TIPS[day%TIPS.length];
-  const list=TIPS.filter(t=>U.tipCat==="All"||t.c===U.tipCat);
+  const all=TIPS.filter(t=>U.tipCat==="All"||t.c===U.tipCat);
+  const list=all.filter(t=>can("tips")||t.free),hidden=all.length-list.length;
   return `<h1>Diet & nutrition tips</h1>
   <div class="card" style="background:var(--leaf-soft);border-color:transparent"><span class="muted">Tip of the day</span><h2 style="margin-top:4px">${esc(daily.t)}</h2><p>${esc(daily.b)}</p></div>
   <div class="chips">${cats.map(c=>`<button class="chip ${U.tipCat===c?"on":""}" data-a="tipCat" data-v="${c}">${c}</button>`).join("")}</div>
   ${list.map(t=>`<div class="card tip"><span class="muted">${t.c}</span><h3>${esc(t.t)}</h3><p>${esc(t.b)}</p></div>`).join("")}
+  ${hidden?lockCard("tips",hidden+" more tip"+(hidden>1?"s":""),"Unlock every tip in every category."):""}
   <p class="muted">General information only, not medical advice. Talk to a doctor or dietitian for personal needs, especially with a medical condition, pregnancy or a history of disordered eating.</p>`;
 }
 
@@ -367,29 +458,108 @@ function viewWeek(){
     <div class="bars"><div class="goalline" style="bottom:calc(${gl}% * .82 + 24px)" title="Goal"></div>
     ${days.map((d,i)=>`<div class="col"><i style="height:calc(${vals[i]/max*100}% * .82);${vals[i]>S.goal?"background:var(--tomato)":""}"></i><span>${d.toLocaleDateString(undefined,{weekday:"narrow"})}</span></div>`).join("")}</div>
     <p class="muted" style="margin-top:10px">Dashed line = your ${S.goal} kcal goal.</p></div>
+  ${can("macroavg")?macroAvgCard(days):lockCard("macroavg","Weekly macro averages","See your average protein, carbs and fat for the week.")}
+  ${can("insights")?insightsCard():lockCard("insights","30-day insights","Track your streak, on-target days and weight change over 30 days.")}
   <div class="card"><h2>Weight</h2>
-    <div class="row"><input id="wt" type="number" inputmode="decimal" step="0.1" placeholder="Today's weight (kg)" aria-label="Weight in kilograms"><button class="btn" style="width:auto;white-space:nowrap" data-a="logWeight">Save</button></div>
-    ${S.weights.slice(-6).reverse().map(w=>`<div class="entry"><span class="grow">${new Date(w.d+"T00:00").toLocaleDateString(undefined,{month:"short",day:"numeric"})}</span><b>${w.kg} kg</b></div>`).join("")}
+    <div class="row"><input id="wt" type="number" inputmode="decimal" step="0.1" placeholder="Today's weight (${imp()?"lb":"kg"})" aria-label="Weight in ${imp()?"pounds":"kilograms"}"><button class="btn" style="width:auto;white-space:nowrap" data-a="logWeight">Save</button></div>
+    ${S.weights.slice(-6).reverse().map(w=>`<div class="entry"><span class="grow">${new Date(w.d+"T00:00").toLocaleDateString(undefined,{month:"short",day:"numeric"})}</span><b>${wfmt(w.kg)}</b></div>`).join("")}
     ${S.weights.length?"":`<p class="muted" style="margin-top:8px">Log your weight weekly to see the trend.</p>`}</div>`;
 }
 
+function macroAvgCard(days){
+  const L=days.map(d=>sum(entries(d))).filter(x=>x.k>0),n=L.length||1,T=targets();
+  const a=L.reduce((m,x)=>({p:m.p+x.p,c:m.c+x.c,f:m.f+x.f}),{p:0,c:0,f:0});
+  return `<div class="card"><div class="row between"><h2 style="margin:0">Macro averages</h2><span class="muted">${L.length} day${L.length===1?"":"s"} logged</span></div>
+  <div class="grid3" style="margin-top:12px">
+    <div class="stat"><span class="muted">Protein</span><b>${r0(a.p/n)} g</b><span class="muted">goal ${r0(T.p)}</span></div>
+    <div class="stat"><span class="muted">Carbs</span><b>${r0(a.c/n)} g</b><span class="muted">goal ${r0(T.c)}</span></div>
+    <div class="stat"><span class="muted">Fat</span><b>${r0(a.f/n)} g</b><span class="muted">goal ${r0(T.f)}</span></div></div></div>`;
+}
+function insightsCard(){
+  const days=[...Array(30)].map((_,i)=>{const d=new Date();d.setDate(d.getDate()-(29-i));return d});
+  const tot=days.map(d=>sum(entries(d)).k),logged=tot.filter(v=>v>0);
+  const avg=logged.length?logged.reduce((a,b)=>a+b,0)/logged.length:0;
+  const onT=logged.filter(v=>v>=S.goal*.9&&v<=S.goal*1.1).length;
+  let streak=0;for(let i=entries(new Date()).length?0:1;i<400;i++){const d=new Date();d.setDate(d.getDate()-i);if(entries(d).length)streak++;else break}
+  const cut=dkey(days[0]),ws=S.weights.filter(w=>w.d>=cut).sort((a,b)=>a.d<b.d?-1:1);
+  let wc="–";if(ws.length>1){const dv=ws[ws.length-1].kg-ws[0].kg;wc=(dv>0?"+":"")+(imp()?r1(dv*2.20462)+" lb":r1(dv)+" kg")}
+  const max=Math.max(S.goal*1.25,...tot);
+  return `<div class="card"><h2>30-day insights</h2>
+  <div class="grid2" style="margin-top:8px">
+    <div class="stat"><span class="muted">Average per logged day</span><b>${r0(avg)} kcal</b></div>
+    <div class="stat"><span class="muted">Within 10% of goal</span><b>${logged.length?r0(onT/logged.length*100):0}%</b></div>
+    <div class="stat"><span class="muted">Logging streak</span><b>${streak} day${streak===1?"":"s"}</b></div>
+    <div class="stat"><span class="muted">Weight change</span><b>${wc}</b></div></div>
+  <div class="bars" style="gap:3px;height:110px"><div class="goalline" style="bottom:${S.goal/max*100}%"></div>
+    ${tot.map(v=>`<div class="col" style="gap:0"><i style="height:${v/max*100}%;${v>S.goal?"background:var(--tomato)":""}"></i></div>`).join("")}</div>
+  <p class="muted" style="margin-top:10px">Last 30 days. Dashed line = your ${S.goal} kcal goal.</p></div>`;
+}
+
 function viewMe(){
+  const tabs=[["account","Account"],["body","Body & goal"],["plans","Plans"]],t=U.meTab||"account";
+  return `<h1>Profile</h1><div class="chips">${tabs.map(([id,l])=>`<button class="chip ${t===id?"on":""}" data-a="meTab" data-v="${id}">${l}</button>`).join("")}</div>`+
+    ({account:viewAccount,body:viewBody,plans:viewPlans}[t]||viewAccount)();
+}
+
+function viewAccount(){
+  const u=acct();
+  const head=u?`<div class="card"><div class="row"><div class="avatar" aria-hidden="true">${esc((u.name[0]||"?").toUpperCase())}</div>
+      <div class="grow"><h2 style="margin:0">${esc(u.name)}</h2><span class="muted" style="word-break:break-all">${esc(u.email)}</span></div><span class="badge ${u.plan}">${PLANS[u.plan].n}</span></div>
+      <div style="height:14px"></div><div class="grid2"><button class="btn sec" data-a="meTab" data-v="plans">Manage plan</button><button class="btn sec" data-a="logout">Log out</button></div></div>`
+    :`<div class="card"><div class="row"><div class="avatar" aria-hidden="true">?</div><div class="grow"><h2 style="margin:0">Guest</h2><span class="muted">Free plan, no account</span></div><span class="badge">Free</span></div>
+      <p class="muted" style="margin:12px 0">Create an account to upgrade to Basic or Premium and keep your data under your own login.</p>
+      <div class="grid2"><button class="btn" data-a="authMode" data-v="signup">Create account</button><button class="btn sec" data-a="authMode" data-v="login">Log in</button></div></div>`;
+  const prefs=`<div class="card"><h2>Preferences</h2>
+    <label for="uUnits">Units</label><select id="uUnits" onchange="setPref('units',this.value)"><option value="metric" ${S.prefs.units==="metric"?"selected":""}>Metric (kg, cm)</option><option value="imperial" ${S.prefs.units==="imperial"?"selected":""}>Imperial (lb, in)</option></select>
+    <label for="uWater">Daily water goal (glasses of 250 ml)</label><input id="uWater" type="number" inputmode="numeric" min="1" max="20" value="${S.prefs.water}" onchange="setPref('water',this.value)"></div>`;
+  const details=u?`<div class="card"><h2>Account details</h2><label for="uName">Name</label><input id="uName" value="${esc(u.name)}" autocomplete="name">
+      <div style="height:12px"></div><button class="btn sec" data-a="saveName">Save name</button></div>
+    <div class="card"><h2>Change password</h2>
+      <label for="oPw">Current password</label><input id="oPw" type="password" autocomplete="current-password">
+      <label for="nPw">New password (8+ characters)</label><input id="nPw" type="password" autocomplete="new-password">
+      <div class="err" id="pwErr" role="alert"></div><button class="btn sec" data-a="changePw">Update password</button></div>`:"";
+  const data=`<div class="card"><h2>Your data</h2>
+    <div class="grid2"><button class="btn sec" data-a="export">Export backup${can("exp")?"":" (Basic)"}</button><button class="btn danger" data-a="reset">Erase all data</button></div>
+    ${u?`<button class="btn danger" style="margin-top:10px" data-a="deleteAccount">Delete account</button>`:""}</div>`;
+  return head+prefs+details+data;
+}
+
+function viewBody(){
   const p=S.profile||{sex:"f",age:30,height:170,weight:70,act:1.375,goal:"lose"};
-  return `<h1>${S.profile?"Profile & goal":"Welcome to NutriLog"}</h1>
-  <p class="muted">${S.profile?"Update your details to recalculate your daily calories.":"Enter your details to get a personal daily calorie goal. It all stays on your device."}</p>
+  const hv=imp()?r1(p.height/2.54):p.height,wv=imp()?r1(p.weight*2.20462):p.weight;
+  const sp=S.split||defaultSplit();
+  return `<h2 style="margin-top:6px">${S.profile?"Body & goal":"Welcome to NutriLog"}</h2>
+  <p class="muted">${S.profile?"Update your details to recalculate your daily calories.":"Enter your details to get a personal daily calorie goal."}</p>
   <div class="card">
     <div class="grid2"><div><label for="pSex">Sex</label><select id="pSex"><option value="f" ${p.sex==="f"?"selected":""}>Female</option><option value="m" ${p.sex==="m"?"selected":""}>Male</option></select></div>
     <div><label for="pAge">Age</label><input id="pAge" type="number" inputmode="numeric" value="${p.age}"></div></div>
-    <div class="grid2"><div><label for="pH">Height (cm)</label><input id="pH" type="number" inputmode="decimal" value="${p.height}"></div>
-    <div><label for="pW">Weight (kg)</label><input id="pW" type="number" inputmode="decimal" value="${p.weight}"></div></div>
+    <div class="grid2"><div><label for="pH">Height (${imp()?"in":"cm"})</label><input id="pH" type="number" inputmode="decimal" value="${hv}"></div>
+    <div><label for="pW">Weight (${imp()?"lb":"kg"})</label><input id="pW" type="number" inputmode="decimal" value="${wv}"></div></div>
     <label for="pAct">Activity level</label><select id="pAct">${ACT.map(([n,v])=>`<option value="${v}" ${v===p.act?"selected":""}>${n}</option>`).join("")}</select>
     <label for="pGoal">Goal</label><select id="pGoal">${GOALS.map(([id,n])=>`<option value="${id}" ${id===p.goal?"selected":""}>${n}</option>`).join("")}</select>
     <div style="height:14px"></div><button class="btn" data-a="saveProfile">${S.profile?"Save & recalculate":"Calculate my goal"}</button></div>
   ${S.profile?`<div class="card"><span class="muted">Your daily goal</span><div class="row between"><b style="font-size:30px">${S.goal} kcal</b></div>
     <label for="pGoalK">Adjust manually (kcal)</label><div class="row"><input id="pGoalK" type="number" inputmode="numeric" value="${S.goal}"><button class="btn sec" style="width:auto" data-a="setGoal">Set</button></div>
     <p class="muted" style="margin-top:8px">Estimated with the Mifflin-St Jeor formula. Goals are never set below 1,200 kcal.</p></div>
-  <div class="card"><h2>Your data</h2><div class="grid2"><button class="btn sec" data-a="export">Export backup</button><button class="btn danger" data-a="reset">Erase all data</button></div></div>`:""}
+  ${can("split")?`<div class="card"><h2>Custom macro targets</h2><p class="muted">Set your own split. It must total 100%.</p>
+    <div class="grid3"><div><label for="sP">Protein %</label><input id="sP" type="number" inputmode="numeric" value="${sp.p}"></div>
+    <div><label for="sC">Carbs %</label><input id="sC" type="number" inputmode="numeric" value="${sp.c}"></div>
+    <div><label for="sF">Fat %</label><input id="sF" type="number" inputmode="numeric" value="${sp.f}"></div></div>
+    <div style="height:12px"></div><div class="grid2"><button class="btn sec" data-a="saveSplit">Save split</button><button class="btn danger" data-a="resetSplit">Use default</button></div></div>`
+    :lockCard("split","Custom macro targets","Choose your own protein, carb and fat split instead of the default.")}`:""}
   <p class="muted">Estimates only, not medical advice. Consult a health professional before making major diet changes.</p>`;
+}
+
+function viewPlans(){
+  const cur=plan();
+  return `<p class="muted" style="margin:6px 0">${A.session?"Your data is kept if you change plans.":"Create a free account to change plans."}</p>`+
+  ["free","basic","premium"].map(id=>{
+    const p=PLANS[id],is=id===cur,up=RANK[id]>RANK[cur];
+    return `<div class="card plan ${is?"cur":""}"><div class="row between"><div><h2 style="margin:0">${p.n}</h2><span class="muted">${p.tag}</span></div>
+      <div class="price" style="text-align:right"><b>${p.price?"$"+p.price.toFixed(2):"$0"}</b><div class="muted">${p.price?"per month":"forever"}</div></div></div>
+      <ul>${p.feat.map(([t,y])=>`<li class="${y?"":"no"}">${t}</li>`).join("")}</ul>
+      ${is?`<button class="btn sec" disabled>Current plan</button>`:`<button class="btn ${up?"":"sec"}" data-a="choosePlan" data-v="${id}">${up?"Upgrade to "+p.n:"Switch to "+p.n}</button>`}</div>`}).join("")+
+  `<p class="muted">Demo prices. Plans change instantly and no payment is taken in this version.</p>`;
 }
 
 /* ================= SHEET (add food) ================= */
@@ -400,11 +570,28 @@ function recents(){
     if(e.u&&!seen.has(e.u.n)&&out.length<8){seen.add(e.u.n);out.push(e.u)}}));
   return out;
 }
-function openSheet(meal){U.sheet={meal,mode:"search",sel:null,qty:1};drawSheet();$("#sheetbg").style.display="block";$("#sheet").style.display="block"}
+function openPanel(o){U.sheet=o;drawSheet();$("#sheetbg").style.display="block";$("#sheet").style.display="block"}
+function openSheet(meal){openPanel({meal,mode:"search",sel:null,qty:1})}
+const upsell=f=>openPanel({upsell:f});
+function drawUpsell(f){
+  const [t,d]=UPSELL[f],need=NEED[f],pn=PLANS[need].n;
+  $("#sheet").innerHTML=`<div class="row between"><span class="badge ${need}">${pn}</span><button class="iconbtn" data-a="closeSheet" aria-label="Close">×</button></div>
+  <h2 style="margin-top:12px">${t}</h2><p>${d}</p><p class="muted" style="margin:8px 0 16px">Included in ${pn}${need==="basic"?" and Premium":""}.</p>
+  <div class="grid2"><button class="btn sec" data-a="closeSheet">Not now</button><button class="btn" data-a="plans">See plans</button></div>`;
+}
+function drawCheckout(id){
+  const p=PLANS[id];
+  $("#sheet").innerHTML=`<div class="row between"><h2 style="margin:0">Upgrade to ${p.n}</h2><button class="iconbtn" data-a="closeSheet" aria-label="Close">×</button></div>
+  <div class="card"><div class="row between"><b>${p.n} plan</b><b>$${p.price.toFixed(2)} / month</b></div></div>
+  <p class="muted" style="margin-bottom:16px">Demo checkout: no card is needed and nothing is charged. Real payments need a server and a payment provider such as Stripe.</p>
+  <div class="grid2"><button class="btn sec" data-a="closeSheet">Cancel</button><button class="btn" data-a="confirmPlan" data-v="${id}">Start ${p.n}</button></div>`;
+}
 function closeSheet(){stopScan();U.sheet=null;$("#sheetbg").style.display="none";$("#sheet").style.display="none"}
 function drawSheet(){
   stopScan();
   const s=U.sheet;if(!s)return;
+  if(s.upsell)return drawUpsell(s.upsell);
+  if(s.checkout)return drawCheckout(s.checkout);
   const mealSel=`<select id="sMeal" aria-label="Meal" onchange="U.sheet.meal=this.value">${SLOTS.map(([id,n])=>`<option value="${id}" ${id===s.meal?"selected":""}>${n}</option>`).join("")}</select>`;
   let body="";
   if(s.sel&&s.sel.byWeight){
@@ -429,13 +616,13 @@ function drawSheet(){
     body=`<label for="cN">Food name</label><input id="cN" placeholder="e.g. Homemade soup">
     <div class="grid2"><div><label for="cK">Calories</label><input id="cK" type="number" inputmode="decimal"></div><div><label for="cP">Protein (g)</label><input id="cP" type="number" inputmode="decimal"></div>
     <div><label for="cC">Carbs (g)</label><input id="cC" type="number" inputmode="decimal"></div><div><label for="cF">Fat (g)</label><input id="cF" type="number" inputmode="decimal"></div></div>
-    <label class="row" style="color:var(--ink);font-size:15px;margin-top:14px"><input id="cS" type="checkbox" checked style="width:22px;height:22px"> Save to my foods</label>
+    <label class="row" style="color:var(--ink);font-size:15px;margin-top:14px"><input id="cS" type="checkbox" checked style="width:22px;height:22px"> Save to my foods${can("custom")>=1e9?"":" ("+S.custom.length+"/"+can("custom")+" on Free)"}</label>
     <div style="height:12px"></div><button class="btn" data-a="saveCustom">Add to log</button>`;
   }else{
     body=`<input id="q" type="search" placeholder="Search foods (e.g. chicken, rice)" autocomplete="off" aria-label="Search foods"><div id="results"></div>`;
   }
   $("#sheet").innerHTML=`<div class="row between" style="margin-bottom:12px"><div class="grow">${mealSel}</div><button class="iconbtn" data-a="closeSheet" aria-label="Close">×</button></div>
-  ${s.sel?"":`<div class="chips"><button class="chip ${s.mode==="scan"?"on":""}" data-a="mode" data-v="scan">Scan barcode</button><button class="chip ${s.mode==="search"?"on":""}" data-a="mode" data-v="search">Search</button><button class="chip ${s.mode==="custom"?"on":""}" data-a="mode" data-v="custom">Custom food</button></div>`}${body}`;
+  ${s.sel?"":`<div class="chips"><button class="chip ${s.mode==="scan"?"on":""}" data-a="mode" data-v="scan">Scan barcode${can("scan")?"":" 🔒"}</button><button class="chip ${s.mode==="search"?"on":""}" data-a="mode" data-v="search">Search</button><button class="chip ${s.mode==="custom"?"on":""}" data-a="mode" data-v="custom">Custom food</button></div>`}${body}`;
   if(!s.sel&&s.mode==="search"){fillResults("");const q=$("#q");q.addEventListener("input",()=>fillResults(q.value));}
   if(!s.sel&&s.mode==="scan"&&HAS_BD)startScan();
   if(s.sel&&s.sel.byWeight)upd();
@@ -506,13 +693,13 @@ document.addEventListener("click",e=>{
   const a=el.dataset.a,v=el.dataset.v;
   switch(a){
     case"tab":U.tab=v;render();break;
-    case"prevday":U.day.setDate(U.day.getDate()-1);render();break;
+    case"prevday":if(daysBack(U.day)+1>can("hist")){upsell("hist");break}U.day.setDate(U.day.getDate()-1);render();break;
     case"nextday":if(!isToday(U.day)){U.day.setDate(U.day.getDate()+1);render()}break;
     case"water":{const k=dkey(U.day);S.water[k]=Math.max(0,(S.water[k]||0)+Number(v));save();render();break}
     case"del":{const k=dkey(U.day);S.log[k]=entries(U.day).filter(x=>String(x.id)!==v);save();render();break}
     case"openSheet":openSheet(v);break;
     case"closeSheet":closeSheet();break;
-    case"mode":U.sheet.mode=v;drawSheet();break;
+    case"mode":if(v==="scan"&&!can("scan")){upsell("scan");break}U.sheet.mode=v;drawSheet();break;
     case"pick":U.sheet.sel=U.results[Number(v)];U.sheet.qty=1;drawSheet();break;
     case"unpick":U.sheet.sel=null;drawSheet();break;
     case"qty":U.sheet.qty=Math.max(.5,U.sheet.qty+Number(v));drawSheet();break;
@@ -528,28 +715,103 @@ document.addEventListener("click",e=>{
       const n=$("#cN").value.trim(),k=num($("#cK").value);
       if(!n||!k){toast("Enter a name and calories");break}
       const u={n,k,p:num($("#cP").value),c:num($("#cC").value),f:num($("#cF").value)};
-      if($("#cS").checked)S.custom.unshift(u);
-      addEntry(U.sheet.meal,n,1,u);closeSheet();render();toast("Added");break}
+      let note="Added";
+      if($("#cS").checked){if(S.custom.length<can("custom"))S.custom.unshift(u);else note="Added, not saved: Free holds 5 foods"}
+      addEntry(U.sheet.meal,n,1,u);closeSheet();render();toast(note);break}
     case"mealFilter":U.mealFilter=v;U.open=null;render();break;
     case"toggleMeal":U.open=U.open===Number(v)?null:Number(v);render();break;
     case"logMeal":{const m=MEALS[Number(v)],slot=$("#slot"+v).value;
       addEntry(slot,m.n,1,{n:m.n,k:m.k,p:m.p,c:m.c,f:m.f});toast("Logged to "+SLOTS.find(s=>s[0]===slot)[1]);break}
     case"tipCat":U.tipCat=v;render();break;
-    case"logWeight":{const kg=parseFloat($("#wt").value);if(!(kg>20&&kg<500)){toast("Enter a valid weight");break}
-      const d=dkey(new Date());S.weights=S.weights.filter(w=>w.d!==d);S.weights.push({d,kg:Math.round(kg*10)/10});save();render();break}
+    case"logWeight":{let kg=parseFloat($("#wt").value);if(imp())kg=kg/2.20462;if(!(kg>20&&kg<500)){toast("Enter a valid weight");break}
+      const d=dkey(new Date());S.weights=S.weights.filter(w=>w.d!==d);S.weights.push({d,kg:r1(kg)});save();render();break}
     case"saveProfile":{
-      const p={sex:$("#pSex").value,age:num($("#pAge").value),height:num($("#pH").value),weight:num($("#pW").value),act:Number($("#pAct").value),goal:$("#pGoal").value};
+      const p={sex:$("#pSex").value,age:num($("#pAge").value),height:r1(num($("#pH").value)*(imp()?2.54:1)),weight:r1(num($("#pW").value)/(imp()?2.20462:1)),act:Number($("#pAct").value),goal:$("#pGoal").value};
       if(p.age<14||p.age>100||p.height<100||p.height>250||p.weight<30||p.weight>300){toast("Please check your details");break}
-      S.profile=p;S.goal=calcGoal(p);save();U.tab="today";render();toast("Daily goal: "+S.goal+" kcal");break}
+      S.profile=p;S.goal=calcGoal(p);save();U.tab="today";U.meTab="account";render();toast("Daily goal: "+S.goal+" kcal");break}
     case"setGoal":{const k=r0(num($("#pGoalK").value));if(k<1200||k>6000){toast("Choose between 1,200 and 6,000 kcal");break}S.goal=k;save();render();toast("Goal updated");break}
     case"export":{
+      if(!can("exp")){upsell("exp");break}
       const blob=new Blob([JSON.stringify(S,null,2)],{type:"application/json"}),url=URL.createObjectURL(blob),a2=document.createElement("a");
       a2.href=url;a2.download="nutrilog-backup.json";a2.click();setTimeout(()=>URL.revokeObjectURL(url),1000);break}
     case"reset":if(confirm("Erase all your logs, goals and weights from this device? This can't be undone.")){
-      try{localStorage.removeItem(KEY)}catch(e){}S={profile:null,goal:2000,log:{},water:{},custom:[],weights:[],scanned:{}};U.tab="me";render()}break;
+      try{localStorage.removeItem(dataKey())}catch(e){}S=blank();U.tab="me";U.meTab="body";render()}break;
+    /* ---- accounts & plans ---- */
+    case"signup":signup();break;
+    case"login":login();break;
+    case"authMode":U.auth=v;U.authErr="";if(A.guest&&!A.session){A.guest=false;saveA()}render();break;
+    case"guest":A.guest=true;A.session=null;saveA();loadData();U.tab=S.profile?"today":"me";U.meTab=S.profile?"account":"body";U.day=new Date();render();break;
+    case"logout":A.session=null;A.guest=false;saveA();U.auth="login";U.authErr="";U.tab="today";render();break;
+    case"meTab":U.meTab=v;render();break;
+    case"saveName":{const n=$("#uName").value.trim();if(!n){toast("Enter your name");break}acct().name=n;saveA();render();toast("Name saved");break}
+    case"changePw":changePw();break;
+    case"deleteAccount":if(confirm("Delete this account and all its data from this device? This can't be undone.")){
+      const em=A.session;delete A.users[em];try{localStorage.removeItem("nutrilog.data."+em)}catch(e){}
+      A.session=null;A.guest=false;saveA();U.auth="signup";U.authErr="";render()}break;
+    case"upsell":upsell(v);break;
+    case"plans":closeSheet();U.tab="me";U.meTab="plans";render();break;
+    case"choosePlan":{
+      if(!A.session){A.guest=false;U.auth="signup";U.authErr="";saveA();render();break}
+      if(RANK[v]>RANK[plan()])openPanel({checkout:v});
+      else if(confirm("Switch to "+PLANS[v].n+"? Your data is kept, but some features will lock.")){setPlan(v);U.day=new Date();render();toast("Switched to "+PLANS[v].n)}
+      break}
+    case"confirmPlan":setPlan(v);closeSheet();render();toast("You're on "+PLANS[v].n);break;
+    case"saveSplit":{const sp={p:r0(num($("#sP").value)),c:r0(num($("#sC").value)),f:r0(num($("#sF").value))};
+      if(sp.p+sp.c+sp.f!==100){toast("Split must total 100%");break}
+      if(Math.min(sp.p,sp.c,sp.f)<5||Math.max(sp.p,sp.c,sp.f)>70){toast("Keep each macro between 5% and 70%");break}
+      S.split=sp;save();render();toast("Macro targets saved");break}
+    case"resetSplit":S.split=null;save();render();toast("Using default split");break;
   }
 });
-document.addEventListener("keydown",e=>{if(e.key==="Escape"&&U.sheet)closeSheet()});
+document.addEventListener("keydown",e=>{
+  if(e.key==="Escape"&&U.sheet)closeSheet();
+  if(e.key==="Enter"&&/^a(Name|Email|Pass)$/.test(e.target.id)){const b=document.querySelector(".auth .btn");if(b)b.click()}
+});
+/* ---- account helpers ---- */
+function setPlan(id){const u=acct();if(!u)return;u.plan=id;u.planSince=Date.now();saveA()}
+function setPref(k,v){
+  if(k==="water"){v=Math.max(1,Math.min(20,Math.round(+v)||8))}
+  S.prefs[k]=v;save();render();toast("Saved");
+}
+const hex=b=>Array.from(new Uint8Array(b)).map(x=>x.toString(16).padStart(2,"0")).join("");
+async function hashPw(pw,salt){
+  if(!(window.crypto&&crypto.subtle))throw new Error("nocrypto");
+  const enc=new TextEncoder(),key=await crypto.subtle.importKey("raw",enc.encode(pw),"PBKDF2",false,["deriveBits"]);
+  return hex(await crypto.subtle.deriveBits({name:"PBKDF2",salt:enc.encode(salt),iterations:100000,hash:"SHA-256"},key,256));
+}
+const newSalt=()=>hex(crypto.getRandomValues(new Uint8Array(16)));
+function authErr(m){U.authErr=m;const e=$("#aErr");if(e)e.textContent=m}
+function enter(email){A.session=email;A.guest=false;saveA();loadData();U.authErr="";U.day=new Date();U.tab=S.profile?"today":"me";U.meTab=S.profile?"account":"body";render()}
+async function signup(){
+  const name=$("#aName").value.trim(),email=$("#aEmail").value.trim().toLowerCase(),pw=$("#aPass").value;
+  if(!name)return authErr("Enter your name.");
+  if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email))return authErr("Enter a valid email address.");
+  if(pw.length<8)return authErr("Password must be at least 8 characters.");
+  if(A.users[email])return authErr("An account with this email already exists. Log in instead.");
+  try{
+    const salt=newSalt(),hash=await hashPw(pw,salt);
+    A.users[email]={name,email,salt,hash,plan:"free",created:Date.now()};
+    if(!A.legacyAdopted&&hasLegacy()){try{localStorage.setItem("nutrilog.data."+email,localStorage.getItem(LEGACY))}catch(e){}A.legacyAdopted=true}
+    enter(email);toast("Welcome, "+name.split(" ")[0]);
+  }catch(e){authErr("Secure sign-up isn't available here. Open the app from its https link.")}
+}
+async function login(){
+  const email=$("#aEmail").value.trim().toLowerCase(),pw=$("#aPass").value,u=A.users[email];
+  if(!email||!pw)return authErr("Enter your email and password.");
+  try{
+    const h=u?await hashPw(pw,u.salt):null;
+    if(!u||h!==u.hash)return authErr("Email or password is incorrect.");
+    enter(email);
+  }catch(e){authErr("Secure log-in isn't available here. Open the app from its https link.")}
+}
+async function changePw(){
+  const u=acct(),o=$("#oPw").value,n=$("#nPw").value,m=t=>{$("#pwErr").textContent=t};
+  if(n.length<8)return m("New password must be at least 8 characters.");
+  try{
+    if(await hashPw(o,u.salt)!==u.hash)return m("Current password is incorrect.");
+    u.salt=newSalt();u.hash=await hashPw(n,u.salt);saveA();$("#oPw").value="";$("#nPw").value="";m("");toast("Password updated");
+  }catch(e){m("Couldn't update the password here.")}
+}
 if('serviceWorker' in navigator&&location.protocol.indexOf('http')===0){navigator.serviceWorker.register('sw.js').catch(()=>{})}
 render();
 </script>
